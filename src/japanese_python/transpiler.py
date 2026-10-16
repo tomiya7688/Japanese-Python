@@ -93,13 +93,13 @@ def _translate_statement(
     # Tokens constituting the header excluding the final ':' (if present).
     header = sig[:-1] if colon else []
 
-    # Canonical Japanese if is deliberately explicit: `もし EXPR ならば:`.
-    # English `if EXPR:` and `for ...:` remain ordinary Python syntax.
-    if colon and head == "もし":
+    # Canonical Japanese if/elif have matching explicit "... ならば:" syntax.
+    # Original Python `if`, `elif`, and `for` syntax is never rewritten.
+    if colon and head in ("もし", "それ以外でもし"):
         if len(header) < 3 or header[-1].text != "ならば":
-            fail("もし は 'もし 条件 ならば:' の形で書いてください")
+            fail(f"{head} は '{head} 条件 ならば:' の形で書いてください")
         return make([
-            replace(first, "if"),
+            replace(first, "if" if head == "もし" else "elif"),
             remove_after(header[-2], header[-1]),
         ])
 
@@ -107,18 +107,17 @@ def _translate_statement(
     head_map = {
         "関数": "def",
         "クラス": "class",
-        "それ以外でもし": "elif",
         "それ以外": "else",
         "繰り返し": "while",
         "試す": "try",
         "最後に": "finally",
     }
     if colon and head in head_map:
-        if head in ("それ以外でもし", "繰り返し") and len(header) >= 2 and header[-1].text == "なら":
+        if head == "繰り返し" and len(header) >= 2 and header[-1].text == "なら":
             fail("前置構文と 'なら' 構文は組み合わせられません")
         if head in ("それ以外", "試す", "最後に") and len(header) != 1:
             fail(f"{head} は単独のブロックヘッダとして使用してください")
-        if head in ("それ以外でもし", "繰り返し") and len(header) < 2:
+        if head == "繰り返し" and len(header) < 2:
             fail(f"{head} の後には Python の条件式が必要です")
         if head in ("関数", "クラス") and len(header) < 2:
             fail(f"{head} の後には名前が必要です")
@@ -155,7 +154,7 @@ def _translate_statement(
     # The second Japanese word order: 'expression なら:'.
     # Do not silently support `もし condition なら:` or other hybrids.
     if colon and len(header) >= 2 and header[-1].text == "なら":
-        if head in ("それ以外でもし", "繰り返し"):
+        if head == "繰り返し":
             fail("前置構文と 'なら' 構文は組み合わせられません")
         end_marker = header[-1]
         previous = header[-2]

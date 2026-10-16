@@ -14,7 +14,7 @@ class TranspilerConformanceTests(unittest.TestCase):
             "関数 判定(点数: int) -> str:\n"
             "    もし 点数 >= 80 ならば:\n"
             "        戻す \"優\"\n"
-            "    それ以外でもし 点数 >= 60:\n"
+            "    それ以外でもし 点数 >= 60 ならば:\n"
             "        \"合格\" を戻す\n"
             "    それ以外:\n"
             "        戻す \"不合格\"\n"
@@ -70,6 +70,45 @@ class TranspilerConformanceTests(unittest.TestCase):
         with contextlib.redirect_stdout(stream):
             exec(compile(output, "mixed.jpy", "exec"), {})
         self.assertEqual(stream.getvalue(), "original if\nEnglish else\nJapanese if\n")
+
+    def test_japanese_elif_requires_naraba(self):
+        for line in ("それ以外でもし x:", "それ以外でもし x なら:", "それ以外でもし ならば:"):
+            with self.subTest(line=line):
+                source = "もし False ならば:\n    pass\n" + line + "\n    pass\n"
+                with self.assertRaisesRegex(SyntaxError, "ならば"):
+                    transpile(source, filename="sample.jpy")
+
+    def test_python_elif_and_japanese_elif_can_follow_either_if(self):
+        source = (
+            "if False:\n"
+            "    result = 0\n"
+            "それ以外でもし 2 > 1 ならば:  # keep this comment\n"
+            "    result = 1\n"
+            "else:\n"
+            "    result = -1\n"
+            "もし False ならば:\n"
+            "    result = -99\n"
+            "elif result == 1:\n"
+            "    result += 1\n"
+        )
+        expected = (
+            "if False:\n"
+            "    result = 0\n"
+            "elif 2 > 1:  # keep this comment\n"
+            "    result = 1\n"
+            "else:\n"
+            "    result = -1\n"
+            "if False:\n"
+            "    result = -99\n"
+            "elif result == 1:\n"
+            "    result += 1\n"
+        )
+        output = transpile(source)
+        self.assertEqual(output, expected)
+        self.assertEqual(source.count("\n"), output.count("\n"))
+        namespace = {}
+        exec(compile(output, "mixed_elif.jpy", "exec"), namespace)
+        self.assertEqual(namespace["result"], 2)
 
     def test_preposed_and_postposed_equivalence(self):
         source = (
