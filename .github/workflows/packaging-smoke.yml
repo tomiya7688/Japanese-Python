@@ -1,0 +1,39 @@
+name: PyInstaller and Nuitka smoke tests
+
+# Heavy, environment-dependent builds are opt-in. They only receive generated .py.
+on:
+  workflow_dispatch:
+
+jobs:
+  packagers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        packager: [pyinstaller, nuitka]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - name: Translate JPy to standalone Python
+        run: jpy compile examples/hello.jpy -o build/hello.py
+      - name: Prove emitted Python runs without the JPy runtime
+        run: python -I build/hello.py
+      - name: Install selected packager
+        run: python -m pip install ${{ matrix.packager }}
+      - name: PyInstaller packaging smoke test
+        if: matrix.packager == 'pyinstaller'
+        run: |
+          python -m PyInstaller --onefile --name jpy-hello --distpath dist build/hello.py
+          dist/jpy-hello
+      - name: Nuitka packaging smoke test
+        if: matrix.packager == 'nuitka'
+        run: |
+          python -m nuitka --mode=standalone --output-dir=dist build/hello.py
+          if [ -x dist/hello.dist/hello.bin ]; then
+            dist/hello.dist/hello.bin
+          else
+            dist/hello.dist/hello
+          fi

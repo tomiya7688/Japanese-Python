@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "japanese-python-language"
+version = "0.1.0"
+description = "Specification-first Japanese syntax for Python with minimal compile/run tools"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{name = "Japanese-Python contributors"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.scripts]
+jpy = "japanese_python.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
