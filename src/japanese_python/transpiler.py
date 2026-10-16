@@ -93,11 +93,20 @@ def _translate_statement(
     # Tokens constituting the header excluding the final ':' (if present).
     header = sig[:-1] if colon else []
 
+    # Canonical Japanese if is deliberately explicit: `もし EXPR ならば:`.
+    # English `if EXPR:` and `for ...:` remain ordinary Python syntax.
+    if colon and head == "もし":
+        if len(header) < 3 or header[-1].text != "ならば":
+            fail("もし は 'もし 条件 ならば:' の形で書いてください")
+        return make([
+            replace(first, "if"),
+            remove_after(header[-2], header[-1]),
+        ])
+
     # Keyword-led compound statements, recognized only as block headers.
     head_map = {
         "関数": "def",
         "クラス": "class",
-        "もし": "if",
         "それ以外でもし": "elif",
         "それ以外": "else",
         "繰り返し": "while",
@@ -105,11 +114,11 @@ def _translate_statement(
         "最後に": "finally",
     }
     if colon and head in head_map:
-        if head in ("もし", "それ以外でもし", "繰り返し") and len(header) >= 2 and header[-1].text == "なら":
+        if head in ("それ以外でもし", "繰り返し") and len(header) >= 2 and header[-1].text == "なら":
             fail("前置構文と 'なら' 構文は組み合わせられません")
         if head in ("それ以外", "試す", "最後に") and len(header) != 1:
             fail(f"{head} は単独のブロックヘッダとして使用してください")
-        if head in ("もし", "それ以外でもし", "繰り返し") and len(header) < 2:
+        if head in ("それ以外でもし", "繰り返し") and len(header) < 2:
             fail(f"{head} の後には Python の条件式が必要です")
         if head in ("関数", "クラス") and len(header) < 2:
             fail(f"{head} の後には名前が必要です")
@@ -144,9 +153,9 @@ def _translate_statement(
         return make(edits)
 
     # The second Japanese word order: 'expression なら:'.
-    # Do not silently support 'もし condition なら:' or other hybrid forms.
+    # Do not silently support `もし condition なら:` or other hybrids.
     if colon and len(header) >= 2 and header[-1].text == "なら":
-        if head in ("もし", "それ以外でもし", "繰り返し"):
+        if head in ("それ以外でもし", "繰り返し"):
             fail("前置構文と 'なら' 構文は組み合わせられません")
         end_marker = header[-1]
         previous = header[-2]

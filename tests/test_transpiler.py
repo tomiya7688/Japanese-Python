@@ -12,7 +12,7 @@ class TranspilerConformanceTests(unittest.TestCase):
     def test_spec_example_exact_python(self):
         source = (
             "関数 判定(点数: int) -> str:\n"
-            "    もし 点数 >= 80:\n"
+            "    もし 点数 >= 80 ならば:\n"
             "        戻す \"優\"\n"
             "    それ以外でもし 点数 >= 60:\n"
             "        \"合格\" を戻す\n"
@@ -44,10 +44,37 @@ class TranspilerConformanceTests(unittest.TestCase):
             exec(compile(translated, "<conformance>", "exec"), namespace)
         self.assertEqual(buffer.getvalue(), "不合格\n合格\n優\n")
 
+    def test_missing_naraba_is_invalid(self):
+        with self.assertRaisesRegex(SyntaxError, "ならば"):
+            transpile("もし x:\n    print(x)\n")
+        with self.assertRaisesRegex(SyntaxError, "ならば"):
+            transpile("もし x なら:\n    print(x)\n")
+
+    def test_original_python_if_and_for_remain_valid_and_mixed(self):
+        source = (
+            "if True:\n"
+            "    print('original if')\n"
+            "for x in [0, 1]:\n"
+            "    もし x == 1 ならば:\n"
+            "        print('Japanese if')\n"
+            "    else:\n"
+            "        print('English else')\n"
+        )
+        output = transpile(source)
+        self.assertIn("if True:", output)
+        self.assertIn("for x in [0, 1]:", output)
+        self.assertIn("    if x == 1:", output)
+        import io
+        import contextlib
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            exec(compile(output, "mixed.jpy", "exec"), {})
+        self.assertEqual(stream.getvalue(), "original if\nEnglish else\nJapanese if\n")
+
     def test_preposed_and_postposed_equivalence(self):
         source = (
             "関数 first(x):\n"
-            "    もし x:\n"
+            "    もし x ならば:\n"
             "        戻す 42\n"
             "    それ以外:\n"
             "        戻す 0\n"
@@ -67,7 +94,7 @@ class TranspilerConformanceTests(unittest.TestCase):
             "読み込む math として m\n"
             "関数 compute(x):\n"
             "    試す:\n"
-            "        もし x < 0:\n"
+            "        もし x < 0 ならば:\n"
             "            raise ValueError('negative')\n"
             "        戻す m.sqrt(x)\n"
             "    捕まえる ValueError として error:\n"
@@ -88,7 +115,7 @@ class TranspilerConformanceTests(unittest.TestCase):
             "        x = 0\n"
             "        繰り返し x < 5:\n"
             "            x += 1\n"
-            "            もし x == 2:\n"
+            "            もし x == 2 ならば:\n"
             "                続ける\n"
             "            x == 3 なら:\n"
             "                抜ける\n"
@@ -151,7 +178,7 @@ class TranspilerConformanceTests(unittest.TestCase):
         self.assertEqual(transpile("戻す\n"), "return\n")
 
     def test_invalid_hybrid_rejected(self):
-        with self.assertRaisesRegex(SyntaxError, "組み合わせられません"):
+        with self.assertRaisesRegex(SyntaxError, "ならば"):
             transpile("もし x なら:\n    戻す x\n", filename="sample.jpy")
 
     def test_invalid_for_separators_rejected(self):
@@ -160,7 +187,7 @@ class TranspilerConformanceTests(unittest.TestCase):
 
     def test_inline_japanese_suite_not_supported(self):
         with self.assertRaises(SyntaxError):
-            compile(transpile("もし x: print(x)\n"), "a.jpy", "exec")
+            compile(transpile("もし x ならば: print(x)\n"), "a.jpy", "exec")
 
     def test_semicolon_not_supported(self):
         with self.assertRaisesRegex(SyntaxError, "セミコロン"):
