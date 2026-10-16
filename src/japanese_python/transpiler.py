@@ -108,28 +108,59 @@ def _translate_statement(
         "関数": "def",
         "クラス": "class",
         "それ以外": "else",
-        "繰り返し": "while",
         "試す": "try",
         "最後に": "finally",
     }
     if colon and head in head_map:
-        if head == "繰り返し" and len(header) >= 2 and header[-1].text == "なら":
-            fail("前置構文と 'なら' 構文は組み合わせられません")
         if head in ("それ以外", "試す", "最後に") and len(header) != 1:
             fail(f"{head} は単独のブロックヘッダとして使用してください")
-        if head == "繰り返し" and len(header) < 2:
-            fail(f"{head} の後には Python の条件式が必要です")
         if head in ("関数", "クラス") and len(header) < 2:
             fail(f"{head} の後には名前が必要です")
         return make([replace(first, head_map[head])])
 
-    # A Japanese for-loop has TWO explicit separators; no guessing.
-    if colon and head == "各":
-        if len(header) < 5 or header[-1].text != "から":
-            fail("各 は '各 対象 を 式 から:' の形で書いてください")
+    # Numeric for range: 繰り返し i が 0 から 5 まで:
+    # End is EXCLUSIVE, matching CPython's range(0, 5) exactly.
+    if colon and head == "繰り返し" and header[-1].text == "まで":
+        if len(header) < 7:
+            fail("繰り返し は '繰り返し i が 開始 から 終了 まで:' の形で書いてください")
+        ga_positions = [i for i, item in enumerate(header) if item.text == "が"]
+        kara_positions = [i for i, item in enumerate(header) if item.text == "から"]
+        if (ga_positions != [2] or len(kara_positions) != 1
+                or kara_positions[0] < 4 or kara_positions[0] >= len(header) - 2
+                or header[1].token.type != tokenize.NAME):
+            fail("範囲繰り返しは '繰り返し 名前 が 開始 から 終了 まで:' としてください")
+        from_index = kara_positions[0]
+        first_start_expr = header[3]
+        last_start_expr = header[from_index - 1]
+        first_end_expr = header[from_index + 1]
+        last_end_expr = header[-2]
+
+        # Normalize the separator whitespace without changing physical line count.
+        # A newline outside a parenthesized expression is rejected for v0.1.
+        a = _offset(starts, first.token.start)
+        b = _offset(starts, first_start_expr.token.start)
+        c = _offset(starts, last_start_expr.token.end)
+        d = _offset(starts, first_end_expr.token.start)
+        e = _offset(starts, last_end_expr.token.end)
+        f = _offset(starts, header[-1].token.end)
+        original = "".join(lines)
+        if any("\n" in original[x:y] or "\r" in original[x:y]
+               for x, y in ((a, b), (c, d), (e, f))):
+            fail("範囲構文の区切りでは改行できません（式内の括弧による改行は可能）")
+        return make([
+            _Edit(a, b, f"for {header[1].text} in range("),
+            _Edit(c, d, ", "),
+            _Edit(e, f, ")"),
+        ])
+
+    # Generic Python for-loop: keep the original 各 form, and accept
+    # 繰り返し with the same target/iterable grammar until further spec decisions.
+    if colon and head in ("各", "繰り返し") and header[-1].text == "から":
+        if len(header) < 5:
+            fail(f"{head} は '{head} 対象 を 式 から:' の形で書いてください")
         separators = [i for i, item in enumerate(header) if item.text == "を"]
         if len(separators) != 1 or separators[0] < 2 or separators[0] >= len(header) - 2:
-            fail("各 の対象と反復可能な式は最上位の 'を' で一度だけ区切ってください")
+            fail(f"{head} の対象と反復可能な式は最上位の 'を' で一度だけ区切ってください")
         target_sep = header[separators[0]]
         end_marker = header[-1]
         prev = header[-2]
@@ -137,6 +168,18 @@ def _translate_statement(
             replace(first, "for"),
             replace(target_sep, "in"),
             remove_after(prev, end_marker),
+        ])
+
+    if colon and head in ("各", "繰り返し"):
+        fail(f"{head} の構文が不正です。範囲は '繰り返し i が 0 から 5 まで:'、条件反復は '条件 の間:' を使用してください")
+
+    # Postposed while: 条件 の間: -> while 条件:
+    if colon and len(header) >= 2 and header[-1].text == "の間":
+        if head in ("もし", "それ以外でもし"):
+            fail("条件分岐と 'の間' を組み合わせることはできません")
+        return make([
+            _Edit(_offset(starts, first.token.start), _offset(starts, first.token.start), "while "),
+            remove_after(header[-2], header[-1]),
         ])
 
     if colon and head == "捕まえる":
@@ -154,8 +197,6 @@ def _translate_statement(
     # The second Japanese word order: 'expression なら:'.
     # Do not silently support `もし condition なら:` or other hybrids.
     if colon and len(header) >= 2 and header[-1].text == "なら":
-        if head == "繰り返し":
-            fail("前置構文と 'なら' 構文は組み合わせられません")
         end_marker = header[-1]
         previous = header[-2]
         return make([

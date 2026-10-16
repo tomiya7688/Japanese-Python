@@ -152,7 +152,7 @@ class TranspilerConformanceTests(unittest.TestCase):
             "クラス Counter:\n"
             "    関数 count(self):\n"
             "        x = 0\n"
-            "        繰り返し x < 5:\n"
+            "        x < 5 の間:\n"
             "            x += 1\n"
             "            もし x == 2 ならば:\n"
             "                続ける\n"
@@ -164,6 +164,74 @@ class TranspilerConformanceTests(unittest.TestCase):
         namespace = {}
         exec(transpile(source), namespace)
         self.assertEqual(namespace["結果"], 3)
+
+    def test_numeric_for_range_excludes_stop(self):
+        source = (
+            "繰り返し i が 0 から 5 まで:\n"
+            "    print(i)  # まで is exclusive\n"
+        )
+        expected = (
+            "for i in range(0, 5):\n"
+            "    print(i)  # まで is exclusive\n"
+        )
+        self.assertEqual(transpile(source), expected)
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(compile(transpile(source), "range.jpy", "exec"), {})
+        self.assertEqual(out.getvalue(), "0\n1\n2\n3\n4\n")
+
+    def test_numeric_for_range_expressions_and_multiline(self):
+        source = (
+            "a = 1\n"
+            "繰り返し i が (\n"
+            "    a + 1\n"
+            ") から (a + 4) まで:\n"
+            "    print(i)\n"
+        )
+        python = transpile(source)
+        self.assertEqual(source.count("\n"), python.count("\n"))
+        self.assertIn("for i in range((\n    a + 1\n), (a + 4)):", python)
+        import contextlib
+        import io
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exec(compile(python, "range_multiline.jpy", "exec"), {})
+        self.assertEqual(output.getvalue(), "2\n3\n4\n")
+
+    def test_numeric_for_requires_separators_and_single_target(self):
+        for source in (
+            "繰り返し i が 0 から 5:\n    pass\n",
+            "繰り返し i が 0 から 5 まで まで:\n    pass\n",
+            "繰り返し (a, b) が 0 から 5 まで:\n    pass\n",
+            "繰り返し i が 0 から 3 から 5 まで:\n    pass\n",
+            "繰り返し x < 5:\n    pass\n",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaises(SyntaxError):
+                    transpile(source)
+
+    def test_postposed_while_uses_python_conditions(self):
+        source = (
+            "counter = 0\n"
+            "counter < 3 の間:\n"
+            "    counter += 1\n"
+            "while counter < 4:\n"
+            "    counter += 1\n"
+        )
+        py = transpile(source)
+        self.assertIn("while counter < 3:", py)
+        self.assertIn("while counter < 4:", py)
+        scope = {}
+        exec(compile(py, "while.jpy", "exec"), scope)
+        self.assertEqual(scope["counter"], 4)
+        with self.assertRaises(SyntaxError):
+            transpile("もし counter の間:\n    pass\n")
+
+    def test_generic_for_can_use_kurikaeshi_alias(self):
+        source = "繰り返し x を [2, 4] から:\n    print(x)\n"
+        self.assertEqual(transpile(source), "for x in [2, 4]:\n    print(x)\n")
 
     def test_destructuring_and_multiline(self):
         source = (
