@@ -125,7 +125,9 @@ def _translate_statement(
             fail("繰り返し は '繰り返し i が 開始 から 終了 まで:' の形で書いてください")
         ga_positions = [i for i, item in enumerate(header) if item.text == "が"]
         kara_positions = [i for i, item in enumerate(header) if item.text == "から"]
-        if (ga_positions != [2] or len(kara_positions) != 1
+        made_positions = [i for i, item in enumerate(header) if item.text == "まで"]
+        if (ga_positions != [2] or made_positions != [len(header) - 1]
+                or len(kara_positions) != 1
                 or kara_positions[0] < 4 or kara_positions[0] >= len(header) - 2
                 or header[1].token.type != tokenize.NAME):
             fail("範囲繰り返しは '繰り返し 名前 が 開始 から 終了 まで:' としてください")
