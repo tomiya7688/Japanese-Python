@@ -1,14 +1,14 @@
-"""A minimal reference transpiler for JPy v0.1.
+"""Token-based reference translator for spec/JPy-v0.1.md.
 
-The language specification is in spec/JPy-v0.1.md. This implementation is
-intentionally syntax-only: it does not provide a JPy runtime or modify Python
-expressions. All edits are performed on token boundaries, preserving physical
-line numbers, comments, and string contents.
+Only statement syntax is translated. No application code is executed here.
+Comments, literals, expression text and physical line numbers are retained
+apart from the documented BOM/newline normalization.
 """
-
 from __future__ import annotations
 
+import ast
 import io
+import keyword
 import tokenize
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -29,273 +29,297 @@ class _Token:
     def text(self) -> str:
         return self.token.string
 
+    def is_name(self, text: str) -> bool:
+        return self.token.type == tokenize.NAME and self.text == text
 
-def _syntax_error(message: str, filename: str, token: tokenize.TokenInfo, lines: list[str]) -> SyntaxError:
-    line_number, column = token.start
-    line = lines[line_number - 1] if line_number <= len(lines) else ""
-    return SyntaxError(message, (filename, line_number, column + 1, line))
+
+# An English statement remains English, including its inline suite. Literal
+# and expression keywords (True, not, lambda, await, ...) are not in this set.
+_PYTHON_HEADS = frozenset((
+    "def", "class", "if", "elif", "else", "for", "while", "try", "except",
+    "finally", "with", "async", "return", "raise", "assert", "import", "from",
+    "pass", "break", "continue", "del", "global", "nonlocal", "yield",
+    "match", "case",
+))
+_ASSIGNMENTS = frozenset((
+    "=", ":=", ":", "+=", "-=", "*=", "/=", "//=", "%=", "**=", "@=",
+    "&=", "|=", "^=", ">>=", "<<=",
+))
+
+
+def _syntax_error(message: str, filename: str, token: tokenize.TokenInfo,
+                  lines: list[str]) -> SyntaxError:
+    row, col = token.start
+    line = lines[row - 1] if 0 < row <= len(lines) else ""
+    return SyntaxError(message, (filename, row, col + 1, line))
 
 
 def _depth_tokens(tokens: list[tokenize.TokenInfo]) -> list[_Token]:
-    """Mark parentheses depth immediately before each token, not indentation."""
     depth = 0
-    result: list[_Token] = []
+    result = []
     for token in tokens:
-        if token.type in (tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT):
-            continue
-        if token.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
-            continue
-        if token.string in (")", "]", "}"):
+        if token.type == tokenize.OP and token.string in (")", "]", "}"):
             depth -= 1
-        result.append(_Token(token=token, depth=depth))
-        if token.string in ("(", "[", "{"):
+        result.append(_Token(token, depth))
+        if token.type == tokenize.OP and token.string in ("(", "[", "{"):
             depth += 1
     return result
 
 
-def _offset(line_starts: list[int], loc: tuple[int, int]) -> int:
-    line, col = loc
-    return line_starts[line - 1] + col
-
-
-def _translate_statement(
-    tokens: list[tokenize.TokenInfo],
-    lines: list[str],
-    starts: list[int],
-    filename: str,
-) -> list[_Edit]:
+def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
+                         lines: list[str], starts: list[int], filename: str) -> list[_Edit]:
     grouped = _depth_tokens(tokens)
-    if not grouped:
-        return []
-    first = grouped[0]
-    last = grouped[-1]
     sig = [t for t in grouped if t.depth == 0]
     if not sig:
         return []
+    first, last = sig[0], sig[-1]
+    head = first.text
 
-    def replace(token: _Token, replacement: str) -> _Edit:
-        return _Edit(_offset(starts, token.token.start), _offset(starts, token.token.end), replacement)
-
-    def remove_after(previous: _Token, marker: _Token) -> _Edit:
-        return _Edit(_offset(starts, previous.token.end), _offset(starts, marker.token.end), "")
+    def offset(loc: tuple[int, int]) -> int:
+        return starts[loc[0] - 1] + loc[1]
 
     def fail(message: str, target: _Token = first) -> None:
         raise _syntax_error(message, filename, target.token, lines)
 
+    def edit(token: _Token, value: str) -> _Edit:
+        return _Edit(offset(token.token.start), offset(token.token.end), value)
+
+    def gap(left: _Token, right: _Token) -> str:
+        return source[offset(left.token.end):offset(right.token.start)]
+
+    def spaced(left: _Token, right: _Token) -> bool:
+        between = gap(left, right)
+        return bool(between) and all(c in " \t\f" for c in between)
+
+    def cut(left: _Token, marker: _Token, replacement: str = "") -> _Edit:
+        # Removing a cross-line separator would invalidate our line contract.
+        if not spaced(left, marker):
+            fail("構文語の前に空白が必要です。区切り自体では改行できません", marker)
+        return _Edit(offset(left.token.end), offset(marker.token.end), replacement)
+
     def make(edits: list[_Edit]) -> list[_Edit]:
-        if any(item.text == ";" for item in sig):
+        if any(t.token.type == tokenize.OP and t.text == ";" for t in sig):
             fail("JPy の構文をセミコロンで連結することはできません")
         return edits
 
-    colon = last.text == ":" and last.depth == 0
-    head = first.text
+    def positions(items: list[_Token], name: str) -> list[int]:
+        return [i for i, t in enumerate(items) if t.is_name(name)]
 
-    # Tokens constituting the header excluding the final ':' (if present).
+    def expr_text(items: list[_Token]) -> str:
+        if not items:
+            fail("Python の式が必要です")
+        return source[offset(items[0].token.start):offset(items[-1].token.end)]
+
+    def expression(items: list[_Token]) -> ast.expr:
+        try:
+            return ast.parse(expr_text(items), mode="eval").body
+        except SyntaxError:
+            fail("有効な Python の式を指定してください", items[0] if items else first)
+        raise AssertionError("unreachable")
+
+    if (first.token.type == tokenize.NAME and head in _PYTHON_HEADS) or head == "@":
+        return []
+    # Japanese names in assignment, annotation or attribute expressions remain
+    # names. A no-space call/index such as 戻す(x) is also ordinary Python.
+    if len(sig) > 1 and sig[1].text in _ASSIGNMENTS and not (len(sig) == 2 and sig[1].text == ":"):
+        return []
+    colon = last.token.type == tokenize.OP and last.text == ":"
     header = sig[:-1] if colon else []
+    separated_head = len(sig) > 1 and spaced(first, sig[1])
 
-    # Canonical Japanese if/elif have matching explicit "... ならば:" syntax.
-    # Original Python `if`, `elif`, and `for` syntax is never rewritten.
-    if colon and head in ("もし", "それ以外でもし"):
-        if len(header) < 3 or header[-1].text != "ならば":
+    if colon and separated_head and head in ("もし", "それ以外でもし"):
+        if len(header) < 3 or not header[-1].is_name("ならば"):
             fail(f"{head} は '{head} 条件 ならば:' の形で書いてください")
-        return make([
-            replace(first, "if" if head == "もし" else "elif"),
-            remove_after(header[-2], header[-1]),
-        ])
+        return make([edit(first, "if" if head == "もし" else "elif"),
+                     cut(header[-2], header[-1])])
 
-    # Keyword-led compound statements, recognized only as block headers.
-    head_map = {
-        "関数": "def",
-        "クラス": "class",
-        "それ以外": "else",
-        "試す": "try",
-        "最後に": "finally",
-    }
-    if colon and head in head_map:
+    heads = {"関数": "def", "クラス": "class", "それ以外": "else",
+             "試す": "try", "最後に": "finally"}
+    if colon and head in heads and (separated_head or len(header) == 1):
         if head in ("それ以外", "試す", "最後に") and len(header) != 1:
             fail(f"{head} は単独のブロックヘッダとして使用してください")
         if head in ("関数", "クラス") and len(header) < 2:
             fail(f"{head} の後には名前が必要です")
-        return make([replace(first, head_map[head])])
+        return make([edit(first, heads[head])])
 
-    # Numeric for range: 繰り返し i が 0 から 5 まで:
-    # End is EXCLUSIVE, matching CPython's range(0, 5) exactly.
-    if colon and head == "繰り返し" and header[-1].text == "まで":
-        if len(header) < 7:
-            fail("繰り返し は '繰り返し i が 開始 から 終了 まで:' の形で書いてください")
-        ga_positions = [i for i, item in enumerate(header) if item.text == "が"]
-        kara_positions = [i for i, item in enumerate(header) if item.text == "から"]
-        made_positions = [i for i, item in enumerate(header) if item.text == "まで"]
-        if (ga_positions != [2] or made_positions != [len(header) - 1]
-                or len(kara_positions) != 1
-                or kara_positions[0] < 4 or kara_positions[0] >= len(header) - 2
-                or header[1].token.type != tokenize.NAME):
-            fail("範囲繰り返しは '繰り返し 名前 が 開始 から 終了 まで:' としてください")
-        from_index = kara_positions[0]
-        first_start_expr = header[3]
-        last_start_expr = header[from_index - 1]
-        first_end_expr = header[from_index + 1]
-        last_end_expr = header[-2]
+    if colon and separated_head and head in ("繰り返し", "各"):
+        if head == "繰り返し" and header[-1].text in ("まで", "ずつ"):
+            ga, kara, made = (positions(header, word) for word in ("が", "から", "まで"))
+            stepped = header[-1].is_name("ずつ")
+            if (len(header) < 7 or ga != [2] or len(kara) != 1 or len(made) != 1
+                    or header[1].token.type != tokenize.NAME or keyword.iskeyword(header[1].text)):
+                fail("範囲は '繰り返し 名前 が 開始 から 終了 まで [増分 ずつ]:' としてください")
+            k, m = kara[0], made[0]
+            if (k < 4 or m < k + 2 or (not stepped and m != len(header) - 1)
+                    or (stepped and (m > len(header) - 3 or positions(header, "ずつ") != [len(header) - 1]))):
+                fail("範囲の開始・終了・増分を正しく区切ってください")
+            operands = [header[3:k], header[k + 1:m]]
+            separators = [header[2], header[k]]
+            if stepped:
+                operands.append(header[m + 1:-1])
+                separators.append(header[m])
+            edits = [edit(first, "for")]
+            for n, (operand, separator) in enumerate(zip(operands, separators)):
+                node = expression(operand)
+                if not spaced(header[1] if n == 0 else operands[n - 1][-1], separator):
+                    fail("範囲の構文語の前に空白が必要です", separator)
+                if not spaced(separator, operand[0]):
+                    fail("範囲の構文語の後に空白が必要です", separator)
+                # A tuple is one argument, never extra range() arguments.
+                prefix = "(" if isinstance(node, ast.Tuple) else ""
+                suffix = ")" if prefix else ""
+                a = offset(separator.token.start) if n == 0 else offset(operands[n - 1][-1].token.end)
+                edits.append(_Edit(a, offset(operand[0].token.start),
+                                   ("in range(" if n == 0 else ", ") + prefix))
+                if suffix:
+                    end = offset(operand[-1].token.end)
+                    edits.append(_Edit(end, end, suffix))
+            edits.append(cut(operands[-1][-1], header[-1], ")"))
+            return make(edits)
+        if len(header) < 5 or not header[-1].is_name("から"):
+            fail("反復は '繰り返し 対象 を 式 から:'、条件反復は '条件 の間:' を使用してください")
+        separators = positions(header, "を")
+        if len(separators) != 1 or not 2 <= separators[0] < len(header) - 2:
+            fail("対象と反復可能な式は最上位の 'を' で一度だけ区切ってください")
+        k = separators[0]
+        if not spaced(header[k - 1], header[k]) or not spaced(header[k], header[k + 1]):
+            fail("'を' の前後に空白が必要です", header[k])
+        return make([edit(first, "for"), edit(header[k], "in"), cut(header[-2], header[-1])])
 
-        # Normalize the separator whitespace without changing physical line count.
-        # A newline outside a parenthesized expression is rejected for v0.1.
-        a = _offset(starts, first.token.start)
-        b = _offset(starts, first_start_expr.token.start)
-        c = _offset(starts, last_start_expr.token.end)
-        d = _offset(starts, first_end_expr.token.start)
-        e = _offset(starts, last_end_expr.token.end)
-        f = _offset(starts, header[-1].token.end)
-        original = "".join(lines)
-        if any("\n" in original[x:y] or "\r" in original[x:y]
-               for x, y in ((a, b), (c, d), (e, f))):
-            fail("範囲構文の区切りでは改行できません（式内の括弧による改行は可能）")
-        return make([
-            _Edit(a, b, f"for {header[1].text} in range("),
-            _Edit(c, d, ", "),
-            _Edit(e, f, ")"),
-        ])
-
-    # Generic Python for-loop: keep the original 各 form, and accept
-    # 繰り返し with the same target/iterable grammar until further spec decisions.
-    if colon and head in ("各", "繰り返し") and header[-1].text == "から":
-        if len(header) < 5:
-            fail(f"{head} は '{head} 対象 を 式 から:' の形で書いてください")
-        separators = [i for i, item in enumerate(header) if item.text == "を"]
-        if len(separators) != 1 or separators[0] < 2 or separators[0] >= len(header) - 2:
-            fail(f"{head} の対象と反復可能な式は最上位の 'を' で一度だけ区切ってください")
-        target_sep = header[separators[0]]
-        end_marker = header[-1]
-        prev = header[-2]
-        return make([
-            replace(first, "for"),
-            replace(target_sep, "in"),
-            remove_after(prev, end_marker),
-        ])
-
-    if colon and head in ("各", "繰り返し"):
-        fail(f"{head} の構文が不正です。範囲は '繰り返し i が 0 から 5 まで:'、条件反復は '条件 の間:' を使用してください")
-
-    # Postposed while: 条件 の間: -> while 条件:
-    if colon and len(header) >= 2 and header[-1].text == "の間":
-        if head in ("もし", "それ以外でもし"):
-            fail("条件分岐と 'の間' を組み合わせることはできません")
-        return make([
-            _Edit(_offset(starts, first.token.start), _offset(starts, first.token.start), "while "),
-            remove_after(header[-2], header[-1]),
-        ])
-
-    if colon and head == "捕まえる":
-        sep = [i for i, item in enumerate(header) if item.text == "として"]
-        if len(sep) > 1:
+    if colon and head == "捕まえる" and (separated_head or len(header) == 1):
+        if len(header) > 1 and header[1].text == "*":
+            fail("例外グループには Python の except* を使用してください")
+        aliases = sorted(positions(header, "として") + positions(header, "as"))
+        if len(aliases) > 1:
             fail("例外の別名は 'として' で一度だけ指定してください")
-        edits = [replace(first, "except")]
-        if sep:
-            k = sep[0]
-            if k < 2 or k != len(header) - 2:
+        edits = [edit(first, "except")]
+        if aliases:
+            k = aliases[0]
+            if k < 2 or k != len(header) - 2 or not spaced(header[k - 1], header[k]) or not spaced(header[k], header[k + 1]):
                 fail("捕まえる の別名指定は '例外 として 名前' にしてください")
-            edits.append(replace(header[k], "as"))
+            edits.append(edit(header[k], "as"))
         return make(edits)
 
-    # The second Japanese word order: 'expression なら:'.
-    # Do not silently support `もし condition なら:` or other hybrids.
-    if colon and len(header) >= 2 and header[-1].text == "なら":
-        end_marker = header[-1]
-        previous = header[-2]
-        return make([
-            _Edit(_offset(starts, first.token.start), _offset(starts, first.token.start), "if "),
-            remove_after(previous, end_marker),
-        ])
+    if colon and head == "使う" and separated_head:
+        aliases = sorted(positions(header, "として") + positions(header, "as"))
+        if len(aliases) > 1:
+            fail("使う は 1 つのコンテキストマネージャーを指定します")
+        k = aliases[0] if aliases else len(header)
+        node = expression(header[1:k])
+        if isinstance(node, ast.Tuple):
+            fail("複数のコンテキストマネージャーには Python の with を使用してください")
+        edits = [edit(first, "with")]
+        if aliases:
+            if k == len(header) - 1 or not spaced(header[k - 1], header[k]) or not spaced(header[k], header[k + 1]):
+                fail("使う の別名指定は '式 として 対象' にしてください")
+            edits.append(edit(header[k], "as"))
+            # An unparenthesized comma can introduce a second with-item rather
+            # than a destructuring target; the Japanese form is single-item.
+            try:
+                parsed = ast.parse(f"with {expr_text(header[1:k])} as {expr_text(header[k + 1:])}:\n    pass\n")
+            except SyntaxError:
+                fail("使う の代入先が不正です")
+            if len(parsed.body[0].items) != 1:
+                fail("分解代入の対象は括弧で囲んでください")
+        return make(edits)
 
-    # Import is a simple statement without a trailing colon.
-    if head == "読み込む" and len(sig) >= 2 and sig[1].text not in ("=", ":=", "+=", "-=", "*=", "/=", ":", ".", "("):
-        if any(item.text == "," and item.depth == 0 for item in grouped):
+    if colon and len(header) >= 2 and header[-1].token.type == tokenize.NAME:
+        marker = header[-1]
+        if marker.text in ("なら", "の間") and spaced(header[-2], marker):
+            return make([_Edit(offset(first.token.start), offset(first.token.start),
+                               "if " if marker.text == "なら" else "while "),
+                         cut(header[-2], marker)])
+
+    if head == "読み込む" and separated_head:
+        if any(t.text == "," for t in sig):
             fail("読み込む は v0.1 では一度に 1 モジュールのみ指定できます")
-        sep = [i for i, item in enumerate(sig) if item.text == "として"]
-        if len(sep) > 1:
+        aliases = sorted(positions(sig, "として") + positions(sig, "as"))
+        if len(aliases) > 1:
             fail("読み込む の別名は 'として' で一度だけ指定してください")
-        edits = [replace(first, "import")]
-        if sep:
-            k = sep[0]
-            if k < 2 or k != len(sig) - 2:
+        edits = [edit(first, "import")]
+        if aliases:
+            k = aliases[0]
+            if k < 2 or k != len(sig) - 2 or not spaced(sig[k - 1], sig[k]) or not spaced(sig[k], sig[k + 1]):
                 fail("読み込む の別名指定は 'モジュール として 名前' にしてください")
-            edits.append(replace(sig[k], "as"))
+            edits.append(edit(sig[k], "as"))
         return make(edits)
 
-    # The third Japanese word order: 'expression を戻す'.
-    if len(sig) >= 2 and sig[-1].text == "を戻す":
-        if head == "戻す":
+    if len(sig) >= 2 and last.is_name("を戻す") and spaced(sig[-2], last):
+        if head == "戻す" and separated_head:
             fail("戻す と 'を戻す' を同じ文で混在できません")
-        previous = sig[-2]
-        marker = sig[-1]
-        return make([
-            _Edit(_offset(starts, first.token.start), _offset(starts, first.token.start), "return "),
-            remove_after(previous, marker),
-        ])
+        return make([_Edit(offset(first.token.start), offset(first.token.start), "return "),
+                     cut(sig[-2], last)])
 
-    simple_map = {"戻す": "return", "抜ける": "break", "続ける": "continue", "何もしない": "pass"}
-    if head in simple_map:
-        if head != "戻す" and len(sig) != 1:
-            # "抜ける = 1" remains a valid Python assignment to an identifier.
+    simple = {"戻す": "return", "抜ける": "break", "続ける": "continue",
+              "何もしない": "pass", "投げる": "raise", "確認する": "assert"}
+    if head in simple:
+        if head in ("抜ける", "続ける", "何もしない") and len(sig) != 1:
             return []
-        if head == "戻す" and len(sig) > 1 and sig[1].text in ("=", ":=", "+=", "-=", "*=", "/=", ":"):
-            # JPy's words are otherwise legal Unicode Python identifiers.
+        if len(sig) > 1 and not separated_head:
             return []
-        return make([replace(first, simple_map[head])])
-
+        return make([edit(first, simple[head])])
     return []
 
 
 def transpile(source: str, *, filename: str = "<jpy>") -> str:
-    """Translate a JPy v0.1 source string into plain Python.
+    """Translate without execution; callers validate the whole Python module.
 
-    The result has exactly the same number of physical lines as ``source``;
-    Python's AST, execution semantics, and imports are unchanged. Callers may
-    validate/compile the returned Python source as needed.
+    Syntax/semantic context restrictions are validated by compile_file/run_file.
+    This low-level function may return Python rejected in that final validation.
     """
     if not isinstance(source, str):
         raise TypeError("source must be str")
-
-    # Python honours source encoding declarations when reading .py files.
-    # JPy source and generated Python are *both* UTF-8: reject incompatible
-    # cookies rather than emit a file that CPython would decode incorrectly.
-    source = source.removeprefix("\ufeff")
-    declared_encoding, _ = tokenize.detect_encoding(io.BytesIO(source.encode("utf-8")).readline)
-    if declared_encoding.lower().replace("_", "-") not in ("utf-8", "utf-8-sig"):
-        raise SyntaxError(f"JPy v0.1 は UTF-8 のみ対応しています: {declared_encoding}", (filename, 1, 1, source.splitlines(keepends=True)[0]))
-
-    lines = source.splitlines(keepends=True)
+    source = source.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    lines = io.StringIO(source).readlines()
     starts = [0]
     for line in lines:
         starts.append(starts[-1] + len(line))
-
+    encoding, _ = tokenize.detect_encoding(io.BytesIO(source.encode("utf-8")).readline)
+    if encoding.lower().replace("_", "-") not in ("utf-8", "utf-8-sig"):
+        raise SyntaxError(f"JPy v0.1 は UTF-8 のみ対応しています: {encoding}",
+                          (filename, 1, 1, lines[0] if lines else ""))
+    statements, current = [], []
+    fdepth, fstart = 0, None
     try:
-        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
-        statements: list[list[tokenize.TokenInfo]] = []
-        current: list[tokenize.TokenInfo] = []
-        for token in tokens:
-            if token.type == tokenize.ENDMARKER:
-                if current:
-                    statements.append(current)
-                break
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            # A complete f-string is opaque even on CPython versions that expose
+            # its expression tokens separately. Never translate literal parts.
+            if token.type == getattr(tokenize, "FSTRING_START", -1):
+                if not fdepth:
+                    fstart = token
+                fdepth += 1
+                continue
+            if fdepth:
+                if token.type == getattr(tokenize, "FSTRING_END", -1):
+                    fdepth -= 1
+                    if not fdepth:
+                        a = starts[fstart.start[0] - 1] + fstart.start[1]
+                        b = starts[token.end[0] - 1] + token.end[1]
+                        current.append(tokenize.TokenInfo(tokenize.STRING, source[a:b],
+                                                          fstart.start, token.end, fstart.line))
+                continue
             if token.type in (tokenize.INDENT, tokenize.DEDENT, tokenize.NL, tokenize.COMMENT):
                 continue
-            if token.type == tokenize.NEWLINE:
+            if token.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
                 if current:
                     statements.append(current)
                     current = []
-                continue
-            current.append(token)
-    except (tokenize.TokenError, IndentationError) as exc:
-        raise SyntaxError(f"JPy トークン解析エラー: {exc}") from exc
-
-    edits: list[_Edit] = []
+            else:
+                current.append(token)
+    except tokenize.TokenError as exc:
+        row, col = exc.args[1]
+        raise SyntaxError(str(exc.args[0]), (filename, row, col + 1,
+                          lines[row - 1] if row <= len(lines) else "")) from exc
+    except IndentationError as exc:
+        exc.filename = filename
+        raise
+    edits = []
     for statement in statements:
-        edits.extend(_translate_statement(statement, lines, starts, filename))
-
+        edits.extend(_translate_statement(statement, source, lines, starts, filename))
     previous = len(source)
-    for start, end, value in sorted(edits, reverse=True):
+    for start, end, replacement in sorted(edits, reverse=True):
         if end > previous:
             raise AssertionError("Overlapping JPy token edits")
-        source = source[:start] + value + source[end:]
+        source = source[:start] + replacement + source[end:]
         previous = start
     return source
