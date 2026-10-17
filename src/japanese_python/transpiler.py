@@ -45,6 +45,8 @@ _ASSIGNMENTS = frozenset((
     "=", ":=", ":", "+=", "-=", "*=", "/=", "//=", "%=", "**=", "@=",
     "&=", "|=", "^=", ">>=", "<<=",
 ))
+# Equivalent spellings at the as-position in Japanese import/except/with.
+_ALIAS_WORDS = frozenset(("として", "と名付ける", "as"))
 
 
 def _syntax_error(message: str, filename: str, token: tokenize.TokenInfo,
@@ -104,6 +106,10 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
 
     def positions(items: list[_Token], name: str) -> list[int]:
         return [i for i, t in enumerate(items) if t.is_name(name)]
+
+    def alias_positions(items: list[_Token]) -> list[int]:
+        return [i for i, t in enumerate(items)
+                if t.token.type == tokenize.NAME and t.text in _ALIAS_WORDS]
 
     def expr_text(items: list[_Token]) -> str:
         if not items:
@@ -189,9 +195,9 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
     if colon and head == "捕まえる" and (separated_head or len(header) == 1):
         if len(header) > 1 and header[1].text == "*":
             fail("例外グループには Python の except* を使用してください")
-        aliases = sorted(positions(header, "として") + positions(header, "as"))
+        aliases = alias_positions(header)
         if len(aliases) > 1:
-            fail("例外の別名は 'として' で一度だけ指定してください")
+            fail("例外の別名指定（として / と名付ける / as）は一度だけ指定してください")
         edits = [edit(first, "except")]
         if aliases:
             k = aliases[0]
@@ -201,7 +207,7 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
         return make(edits)
 
     if colon and head == "使う" and separated_head:
-        aliases = sorted(positions(header, "として") + positions(header, "as"))
+        aliases = alias_positions(header)
         if len(aliases) > 1:
             fail("使う は 1 つのコンテキストマネージャーを指定します")
         k = aliases[0] if aliases else len(header)
@@ -233,9 +239,9 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
     if head == "読み込む" and separated_head:
         if any(t.text == "," for t in sig):
             fail("読み込む は v0.1 では一度に 1 モジュールのみ指定できます")
-        aliases = sorted(positions(sig, "として") + positions(sig, "as"))
+        aliases = alias_positions(sig)
         if len(aliases) > 1:
-            fail("読み込む の別名は 'として' で一度だけ指定してください")
+            fail("読み込む の別名指定（として / と名付ける / as）は一度だけ指定してください")
         edits = [edit(first, "import")]
         if aliases:
             k = aliases[0]
@@ -315,7 +321,7 @@ def transpile(source: str, *, filename: str = "<jpy>") -> str:
         raise
     edits = []
     for statement in statements:
-        edits.extend(_translate_statement(statement, source, lines, starts, filename))
+        edits.extend(_translate_statement(statement, source, lines,starts, filename))
     previous = len(source)
     for start, end, replacement in sorted(edits, reverse=True):
         if end > previous:
