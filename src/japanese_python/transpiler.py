@@ -229,6 +229,47 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
                 fail("分解代入の対象は括弧で囲んでください")
         return make(edits)
 
+    # Pattern matching: preserve Python's subject/pattern/guard semantics.
+    # Python match/case statements were returned unchanged at the top.
+    if colon and len(header) >= 2 and header[-1].is_name("に応じて"):
+        if not spaced(header[-2], header[-1]):
+            fail("'に応じて' の前には空白が必要です", header[-1])
+        return make([
+            _Edit(offset(first.token.start), offset(first.token.start), "match "),
+            cut(header[-2], header[-1]),
+        ])
+
+    case_markers = positions(header, "の場合") if colon else []
+    if case_markers:
+        if len(case_markers) != 1 or case_markers[0] == 0:
+            fail("場合分けのパターンと 'の場合' の区切りが曖昧です")
+        k = case_markers[0]
+        marker = header[k]
+        if not spaced(header[k - 1], marker):
+            fail("'の場合' の前には空白が必要です", marker)
+        edits = [
+            _Edit(offset(first.token.start), offset(first.token.start), "case "),
+            cut(header[k - 1], marker),
+        ]
+        trailing = header[k + 1:]
+        if not trailing:
+            return make(edits)
+        if not spaced(marker, trailing[0]):
+            fail("'の場合' の後には空白が必要です", trailing[0])
+        if trailing[0].is_name("if"):
+            if len(trailing) < 2 or not spaced(trailing[0], trailing[1]):
+                fail("場合分けのガードは 'if 条件' としてください")
+            return make(edits)
+        if trailing[0].is_name("もし"):
+            if (len(trailing) < 3 or not trailing[-1].is_name("ならば")
+                    or not spaced(trailing[0], trailing[1])
+                    or not spaced(trailing[-2], trailing[-1])):
+                fail("日本語のガードは 'の場合 もし 条件 ならば:' としてください")
+            edits.append(edit(trailing[0], "if"))
+            edits.append(cut(trailing[-2], trailing[-1]))
+            return make(edits)
+        fail("場合分けのガードは 'の場合 もし 条件 ならば:' または 'の場合 if 条件:' としてください")
+
     if colon and len(header) >= 2 and header[-1].token.type == tokenize.NAME:
         marker = header[-1]
         if marker.text in ("なら", "の間") and spaced(header[-2], marker):
