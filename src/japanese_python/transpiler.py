@@ -236,6 +236,62 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
                                "if " if marker.text == "なら" else "while "),
                          cut(header[-2], marker)])
 
+    # Selection import, with the alias *after* 読み込む:
+    #   math から sqrt を 読み込む
+    #   math から sqrt を 読み込む 平方根 として
+    #   math から sqrt を 読み込む 平方根 と名付ける
+    # The original Python 'from ... import ...' is preserved above.
+    markers = [
+        i for i in range(1, len(sig) - 3)
+        if sig[i].is_name("から")
+        and sig[i + 1].token.type == tokenize.NAME
+        and sig[i + 2].is_name("を")
+        and sig[i + 3].is_name("読み込む")
+        and spaced(sig[i - 1], sig[i])
+        and spaced(sig[i], sig[i + 1])
+        and spaced(sig[i + 1], sig[i + 2])
+        and spaced(sig[i + 2], sig[i + 3])
+    ]
+    if markers:
+        if len(markers) != 1 or colon:
+            fail("選択読み込みの区切りが曖昧です")
+        if any(token.token.start[0] != first.token.start[0] for token in sig):
+            fail("選択読み込みは1物理行で指定してください")
+        k = markers[0]
+        module_tokens = sig[:k]
+        # Restrict v0.1 to absolute dotted module names.
+        if not module_tokens or any(
+            (item.token.type != tokenize.NAME or keyword.iskeyword(item.text))
+            if idx % 2 == 0 else
+            (item.token.type != tokenize.OP or item.text != ".")
+            for idx, item in enumerate(module_tokens)
+        ) or len(module_tokens) % 2 == 0:
+            fail("モジュールは絶対名（math や collections.abc）で指定してください")
+        if keyword.iskeyword(sig[k + 1].text):
+            fail("読み込む名前にはPython識別子を使ってください")
+        tail = sig[k + 4:]
+        alias = None
+        if tail:
+            if (len(tail) != 2
+                    or tail[0].token.type != tokenize.NAME
+                    or keyword.iskeyword(tail[0].text)
+                    or not (tail[1].is_name("として") or tail[1].is_name("と名付ける"))
+                    or not spaced(sig[k + 3], tail[0])
+                    or not spaced(tail[0], tail[1])):
+                fail("別名は 'を 読み込む 別名 として' または 'を 読み込む 別名 と名付ける' の順に書いてください")
+            alias = tail[0].text
+        module = source[offset(first.token.start):offset(sig[k - 1].token.end)]
+        target = "from " + module + " import " + sig[k + 1].text
+        if alias is not None:
+            target += " as " + alias
+        try:
+            node = ast.parse(target + "\n").body[0]
+        except SyntaxError:
+            fail("選択読み込みのモジュール名・名前・別名が不正です")
+        if not isinstance(node, ast.ImportFrom) or node.level != 0 or len(node.names) != 1:
+            fail("選択読み込みは絶対モジュールから1つの名前のみ指定できます")
+        return make([_Edit(offset(first.token.start), offset(last.token.end), target)])
+
     if head == "読み込む" and separated_head:
         if any(t.text == "," for t in sig):
             fail("読み込む は v0.1 では一度に 1 モジュールのみ指定できます")

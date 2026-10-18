@@ -1,4 +1,4 @@
-from io import StringIO
+io から StringIO を 読み込む
 
 関数 分類(点数: int) -> str:
     もし 点数 >= 80 ならば:
