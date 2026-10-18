@@ -256,11 +256,14 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
         return make([_Edit(offset(first.token.start), offset(first.token.start), "return "),
                      cut(sig[-2], last)])
 
-    simple = {"返す": "return", "戻す": "return", "抜ける": "break",
-              "続ける": "continue", "何もしない": "pass",
+    simple = {"返す": "return", "戻す": "return",
+              "繰り返しをやめる": "break", "抜ける": "break",
+              "繰り返しを続ける": "continue", "続ける": "continue",
+              "何もしない": "pass",
               "例外を起こす": "raise", "投げる": "raise", "確認する": "assert"}
     if head in simple:
-        if head in ("抜ける", "続ける", "何もしない") and len(sig) != 1:
+        if head in ("繰り返しをやめる", "繰り返しを続ける",
+                    "抜ける", "続ける", "何もしない") and len(sig) != 1:
             return []
         if len(sig) > 1 and not separated_head:
             return []
