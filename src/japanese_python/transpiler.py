@@ -126,7 +126,7 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
     if (first.token.type == tokenize.NAME and head in _PYTHON_HEADS) or head == "@":
         return []
     # Japanese names in assignment, annotation or attribute expressions remain
-    # names. A no-space call/index such as 戻す(x) is also ordinary Python.
+    # names. A no-space call/index such as 返す(x) is also ordinary Python.
     if len(sig) > 1 and sig[1].text in _ASSIGNMENTS and not (len(sig) == 2 and sig[1].text == ":"):
         return []
     colon = last.token.type == tokenize.OP and last.text == ":"
@@ -192,7 +192,7 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
             fail("'を' の前後に空白が必要です", header[k])
         return make([edit(first, "for"), edit(header[k], "in"), cut(header[-2], header[-1])])
 
-    if colon and head == "捕まえる" and (separated_head or len(header) == 1):
+    if colon and head in ("例外処理", "捕まえる") and (separated_head or len(header) == 1):
         if len(header) > 1 and header[1].text == "*":
             fail("例外グループには Python の except* を使用してください")
         aliases = alias_positions(header)
@@ -202,7 +202,7 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
         if aliases:
             k = aliases[0]
             if k < 2 or k != len(header) - 2 or not spaced(header[k - 1], header[k]) or not spaced(header[k], header[k + 1]):
-                fail("捕まえる の別名指定は '例外 として 名前' にしてください")
+                fail(f"{head} の別名指定は '例外 として 名前' にしてください")
             edits.append(edit(header[k], "as"))
         return make(edits)
 
@@ -250,14 +250,15 @@ def _translate_statement(tokens: list[tokenize.TokenInfo], source: str,
             edits.append(edit(sig[k], "as"))
         return make(edits)
 
-    if len(sig) >= 2 and last.is_name("を戻す") and spaced(sig[-2], last):
-        if head == "戻す" and separated_head:
-            fail("戻す と 'を戻す' を同じ文で混在できません")
+    if len(sig) >= 2 and last.text in ("を返す", "を戻す") and last.token.type == tokenize.NAME and spaced(sig[-2], last):
+        if head in ("返す", "戻す") and separated_head:
+            fail("前置の返す／戻すと後置のを返す／を戻すを同じ文で混在できません")
         return make([_Edit(offset(first.token.start), offset(first.token.start), "return "),
                      cut(sig[-2], last)])
 
-    simple = {"戻す": "return", "抜ける": "break", "続ける": "continue",
-              "何もしない": "pass", "投げる": "raise", "確認する": "assert"}
+    simple = {"返す": "return", "戻す": "return", "抜ける": "break",
+              "続ける": "continue", "何もしない": "pass",
+              "例外を起こす": "raise", "投げる": "raise", "確認する": "assert"}
     if head in simple:
         if head in ("抜ける", "続ける", "何もしない") and len(sig) != 1:
             return []

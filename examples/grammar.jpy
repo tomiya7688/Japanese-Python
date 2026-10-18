@@ -2,11 +2,11 @@ from io import StringIO
 
 関数 分類(点数: int) -> str:
     もし 点数 >= 80 ならば:
-        "優秀" を戻す
+        "優秀" を返す
     それ以外でもし 点数 >= 60 ならば:
-        "合格" を戻す
+        "合格" を返す
     else:
-        戻す "不合格"
+        返す "不合格"
 
 繰り返し (番号, 点数) を enumerate([55, 65, 82]) から:
     print(番号, 分類(点数))
@@ -17,8 +17,8 @@ from io import StringIO
 試す:
     使う StringIO("日本語Python") として 入力:
         確認する 入力.read() == "日本語Python", "内容が異なります"
-    投げる ValueError("例外処理の確認")
-捕まえる ValueError として エラー:
+    例外を起こす ValueError("例外処理の確認")
+例外処理 ValueError として エラー:
     print(エラー)
 最後に:
     print("完了")
